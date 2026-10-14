@@ -8,7 +8,6 @@ kits:
 workspace: ${OMP_SBXENV_WORKSPACE}
 # No ~/.omp in additionalWorkspaces: agent state (agent.db, sessions,
 # memories, managed-skills) lives in the workspace itself, via the kit's
-# PI_CODING_AGENT_DIR. Bedrock opt-in projects run omp-sbx instead - a static
-# env file cannot conditionally mount ~/.omp.
+# PI_CODING_AGENT_DIR — no conditional mounts remain in the kit.
 sandboxOptions:
   template: omp-sbx:latest

@@ -56,9 +56,9 @@ USER agent
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/local/bin/chromium
 
 # ── omp prebuilt binary ──────────────────────────────────────────────────────
-# The `omp --version` smoke test creates /home/agent/.omp on the way out, so
-# delete it: omp-init.sh replaces that path with a symlink to the host mount,
-# and a real directory there gets the symlink nested inside it instead.
+# The `omp --version` smoke test creates /home/agent/.omp on the way out. That
+# is fine to keep: with no host mount, ~/.omp is just the config dir
+# (PI_CONFIG_DIR=.omp), as in a normal install.
 ARG OMP_VERSION=18.1.10
 RUN ARCH="$(uname -m)" && \
     case "$ARCH" in \
@@ -69,34 +69,12 @@ RUN ARCH="$(uname -m)" && \
     curl -fsSL "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/omp-linux-${OMP_ARCH}" \
       -o /home/agent/.local/bin/omp && \
     chmod +x /home/agent/.local/bin/omp && \
-    omp --version && \
-    rm -rf /home/agent/.omp
-
-# ── AWS CLI v2 (Amazon Bedrock provider) ─────────────────────────────────────
-# Two jobs: the browserless SSO device-code login, and `credential_process`.
-# omp reads the SSO access token but not the refresh token beside it, so it
-# cannot renew an expired session; the CLI can, and omp calls out to it.
-USER root
-RUN ARCH="$(uname -m)" && \
-    case "$ARCH" in \
-      aarch64|arm64) AWS_ARCH="aarch64" ;; \
-      x86_64|amd64)  AWS_ARCH="x86_64"  ;; \
-      *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
-    esac && \
-    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${AWS_ARCH}.zip" \
-      -o /tmp/awscli.zip && \
-    unzip -q /tmp/awscli.zip -d /tmp && \
-    /tmp/aws/install && \
-    rm -rf /tmp/awscli.zip /tmp/aws && \
-    aws --version
-USER agent
+    omp --version
 
 # ── Entrypoint ───────────────────────────────────────────────────────────────
 USER root
 COPY sbx-kit/omp-init.sh /usr/local/bin/omp-init.sh
 RUN chmod +x /usr/local/bin/omp-init.sh
-# omp-init.sh loads these only for a project that opts into Bedrock.
-COPY sbx-kit/extensions/ /opt/omp-sbx/extensions/
 USER agent
 
 # ── Environment ──────────────────────────────────────────────────────────────

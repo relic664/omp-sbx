@@ -61,9 +61,6 @@ omp "fix the bug"      # one-shot prompt
 | MCP import | `omp-sbx-mcp-import` | Registers Claude Code's MCP servers with sbx - see [MCP servers](#mcp-servers-from-claude-code) |
 | MCP gateway | `sbx-kit/omp-init.sh` | Opt-in wiring that connects omp to the sandbox's MCP gateway |
 | Browser CLI | `sbx-kit/Dockerfile` | Installs `agent-browser` (replaces Puppeteer, which can't spawn in sbx) |
-| Bedrock auth | `sbx-kit/omp-init.sh` | Opt-in AWS SSO profile with browserless renewal - see [Amazon Bedrock](#amazon-bedrock-aws-sso) |
-| Bedrock login | `omp-sbx-aws-login` | Host-side SSO login, shared with every sandbox via `~/.omp/aws-sso-cache` |
-| SSO nudge | `sbx-kit/extensions/aws-sso-nudge.ts` | omp extension: warns before the SSO login lapses, adds `/aws-login` |
 
 ### Config and state
 
@@ -76,35 +73,43 @@ its own state, including its own model preferences.
 
 A project's provider key comes from the host environment at create time
 (`OPENAI_API_KEY`, `OPENAI_BASE_URL` if set). No auth storage is shared or
-persisted in the sandbox.
+persisted in the sandbox. Nothing else is mounted from the host's home
+directory.
 
-`~/.omp` on the host is mounted **only** when a project opts into Amazon
-Bedrock (see below), which reads `~/.omp/aws-config` and shares
-`~/.omp/aws-sso-cache`. Everything else that used to live in `~/.omp` either
-followed the agent-dir redirect or is not needed.
+### GitHub access
 
-### GitHub auth forwarding
-
-The sandbox forwards your host `gh` CLI session so that `gh` commands and `git push` over HTTPS work without a separate token or SSH setup. This is a **convenience**, not a security boundary — sbx's microVM isolation is the real security control (see [Security](#security)).
-
-**What gets mounted.** If `~/.config/gh` exists on your host, `omp-sbx` bind-mounts it into the sandbox read-write. The kit's startup command symlinks it to `/home/agent/.config/gh` (via `GH_CONFIG_DIR`), then runs `gh auth setup-git` when `hosts.yml` is present — this configures `git`'s credential helper to call `gh auth git-credential`, which supplies the OAuth token for HTTPS remotes.
-
-**Why the token is "insecure."** `~/.config/gh/hosts.yml` contains an OAuth token that can authenticate to GitHub as your user. The mount is read-write, so anything running inside the sandbox can read it. This is acceptable because the sandbox is a short-lived, isolated microVM with a network allow-list — it is not a multi-tenant or untrusted environment. If you need a hard boundary, do **not** mount `~/.config/gh`: remove the `MOUNTS+=("$HOME/.config/gh")` block in the `omp-sbx` launcher (around line 68) and use an HTTPS remote with a separate credential helper or SSH instead.
-
-**Prerequisites.**
-
-1. On the host: `gh auth login` (creates `~/.config/gh/hosts.yml`).
-2. Store the GitHub secret so the sbx proxy can substitute a real token: `sbx secret set github --command 'gh auth token'`. Without it, `gh` and `git push` fail with `401 Unauthorized` (the proxy injects only a placeholder `GH_TOKEN`).
-3. `github.com:443` must be in the network allow-list (it is by default — see `sbx-kit/spec.yaml`).
-**Verifying.** Inside the sandbox:
+GitHub is reached through sbx's built-in credential proxy — no `gh` CLI in the
+sandbox, and no GitHub config mounted. Register the secret once on the host:
 
 ```bash
-gh auth status      # should show your logged-in account
-gh status           # dashboard of assigned issues/PRs/mentions
-git push            # uses gh credential helper, no separate token needed
+sbx secret set github --command 'gh auth token'
 ```
 
-If `gh auth status` fails with `401`, ensure the GitHub secret is stored (`sbx secret ls`). If it fails because the mount is missing, recreate the sandbox with `omp --new` — mounting is decided once, at launch. On macOS, `hosts.yml` contains no token (it lives in the keychain), so `sbx secret set github` is required.
+The host daemon re-runs that command when the cached value ages out, so token
+rotation needs no manual copy. The proxy injects the credential into requests
+to the built-in `github` service's domains (`github.com`, `api.github.com`,
+`raw.githubusercontent.com`, and the rest — see sbx's built-in services
+table), and re-encodes git-over-HTTPS to Basic auth, so `git push`/`pull` over
+HTTPS to github.com works with no credential helper and no SSH setup. The
+token never enters the sandbox — in-container tooling sees no `GH_TOKEN` at
+all.
+
+Two consequences:
+
+- **HTTPS remotes only.** An SSH remote (`git@github.com:…`) and non-GitHub
+  forges are not covered; use an HTTPS remote.
+- **GitHub API work goes through MCP servers**, not `gh`. There is no `gh`
+  binary configured in the sandbox.
+
+Verifying inside the sandbox:
+
+```bash
+git ls-remote https://github.com/<you>/<your-repo>.git   # private repo reachable
+git push                                                 # 401 means no secret registered
+```
+
+If a git operation to github.com returns 401, check `sbx secret ls` — the
+proxy injects nothing when the `github` service has no stored secret.
 
 ### MCP servers from Claude Code
 
@@ -164,123 +169,13 @@ shared host config that resolves only inside a sandbox.
 Changing `OMP_SBX_MCP_GATEWAY` takes effect on the next launch. Changing
 `omp-init.sh` needs `./build.sh` and `omp --new`.
 
-### Amazon Bedrock (AWS SSO)
-
-Off by default. A project turns it on with one line in its `.env`:
-
-```bash
-OMP_SBX_AWS_PROFILE=infra-dev-bedrock
-OMP_SBX_AWS_REGION=us-east-1          # optional, defaults to us-east-1
-```
-
-Define that profile once in `~/.omp/aws-config` on the host. The file uses AWS
-CLI config syntax and holds no secrets:
-
-```ini
-[sso-session my-sso]
-sso_start_url = https://d-xxxxxxxxxx.awsapps.com/start
-sso_region = us-east-1
-sso_registration_scopes = sso:account:access
-
-[profile infra-dev-bedrock]
-sso_session = my-sso
-sso_account_id = 000000000000
-sso_role_name = Bedrock-Invoke-Only
-region = us-east-1
-```
-
-`~/.omp` is bind-mounted for Bedrock projects only — the launcher reads
-`OMP_SBX_AWS_PROFILE` from the project `.env` before create, so editing
-`aws-config` takes effect on the next session - no rebuild. Note the mount
-decision is made at create time: adding or removing the opt-in needs
-`omp --new`.
-
-**Log in once, from the host, and every sandbox shares it.** Run:
-
-```bash
-omp-sbx-aws-login
-```
-
-from a project with `OMP_SBX_AWS_PROFILE` set (or `omp-sbx-aws-login --profile
-<name>` anywhere). It opens a real browser - the host has one, unlike a
-sandbox - and writes the resulting SSO token into `~/.omp/aws-sso-cache`, which
-every sandbox symlinks `~/.aws/sso/cache` to. A brand new sandbox, or one
-recreated with `--new`, picks up an already-valid session immediately; nothing
-about the token needs redoing per sandbox.
-
-Unlike `aws-config` above, this directory does hold something live: a
-refreshable SSO session, scoped to the role in that profile. Sharing it puts
-a live (but role-scoped, non-admin) AWS credential inside the sandbox - the
-one deliberate exception to the no-persistent-credentials rule, and the
-reason the mount is opt-in.
-
-A sandbox can still log in on its own if you'd rather not leave it: run
-`/aws-login` once the session starts, which the nudge extension below handles
-with a device-code flow (no browser inside the sandbox, so `--use-device-code`
-is required there - the alternative PKCE flow's `redirect_uri` is a loopback
-port nothing listens on). That login is shared too, through the same symlink.
-
-**Renewal is browserless.** `omp-init.sh` generates an `omp-bedrock` profile
-whose `credential_process` calls `aws configure export-credentials`. omp reads
-the SSO access token but not the refresh token stored next to it, so on its own
-it treats an expired token as fatal. The AWS CLI does read that refresh token,
-so routing through it renews silently. This requires the `[sso-session]` profile
-shape above - a legacy profile with an inline `sso_start_url` gets no refresh
-token from the CLI.
-
-Three lifetimes stack up, and only the longest one needs you at a browser:
-
-| Layer | Typical lifetime | Renewal |
-|---|---|---|
-| Role credentials | 12 hours | Minted from the access token |
-| SSO access token | 1 hour | Silent, `grantType: refresh_token` |
-| Client registration | ~31 days | `aws sso login`, opening a URL |
-
-Read your own values from `~/.aws/sso/cache/*.json`: `expiresAt` is the access
-token and `registrationExpiresAt` on the same entry is the registration. The role
-credentials carry their own `Expiration`, visible via
-`aws configure export-credentials`.
-
-The role credentials are what actually sign a Bedrock request, and omp caches
-them for their full 12 hours. Only when they lapse does it re-read the SSO access
-token - which is an hour old at most, and which omp cannot renew. So without
-`credential_process` a session dies at the 12 hour mark, and a session started
-more than an hour after the last refresh fails immediately. Sending it through
-the CLI removes both cliffs, because the CLI renews the access token from the
-refresh token with no browser.
-
-One caveat worth knowing: `aws sso login` restarts authorization from scratch
-every time, even when the cached token is still valid. Only the credential path
-(`aws configure export-credentials`) refreshes silently, which is why the
-generated profile uses it.
-
-**The nudge extension** (`sbx-kit/extensions/aws-sso-nudge.ts`) covers the
-30-day boundary, which nothing renews on its own. Loaded only when Bedrock is
-on, it checks every 15 minutes and warns in the chat once fewer than 2 days
-remain (`OMP_SBX_AWS_SSO_WARN_DAYS` overrides the threshold). If credentials stop
-working mid-session, it runs the device-code login itself and puts the URL in the
-chat - open it on your host and the session recovers without a restart.
-
-It stays out of the status line except while a login is waiting for approval.
-The registration is weeks from expiry nearly always, so a standing countdown is
-noise. Read the current values from `~/.aws/sso/cache/*.json` when you want them.
-
-`AWS_CA_BUNDLE` is set in `spec.yaml` because botocore ignores the OS trust
-store in favor of its own bundle, which the sbx TLS proxy would otherwise break.
-
-Adding a region means adding its `bedrock-runtime`, `oidc`, `portal.sso`, and
-`sts` hosts to the network allow-list in `sbx-kit/spec.yaml`.
-
-### LSP servers
-
-The template ships with language servers for Python (`pyright`), TypeScript/JavaScript (`typescript-language-server`), Bash (`bash-language-server`), and Go (`gopls`).
 
 **Two-part setup, split by concern:**
 
 | Part | Location | Rebuild needed? |
 |---|---|---|
 | Binary install | `sbx-kit/Dockerfile` (the `LSP servers` section) | Yes — `./build.sh` |
-| Server registration | `<workspace>/.omp-agent/lsp.yml` (per project) or `~/.omp/lsp.yml` on the host | Workspace copy: no; host copy: only for Bedrock projects (that is the only case `~/.omp` is mounted) |
+| Server registration | `<workspace>/.omp-agent/lsp.yml` (per project) | Workspace copy: no |
 
 `lsp.yml` lives in the agent dir, which is the workspace-local `.omp-agent` —
 editing it takes effect immediately on the next session. Adding or changing a *binary* requires a rebuild + `omp --new`.
@@ -401,12 +296,6 @@ placeholders for real.
 **Known gaps vs `omp-sbx`:**
 - No force-quit recovery cascade (re-attach → restart → recreate) — just
   create-or-reuse.
-- No `~/.config/gh` forwarding. A static env file can't conditionally mount a
-  path that may not exist on every host, and `sbx env create` prompts
-  interactively — hanging in non-interactive/CI contexts — if
-  `additionalWorkspaces` points at a missing directory.
-- No Bedrock support — `~/.omp` (aws-config + SSO cache) is mounted only when
-  a project's `.env` opts in, which a static file cannot express.
 - Re-running `sbx env run` on an existing environment only re-applies
   env/MCP changes; other `.sbxenv.yaml` edits need `--new`.
 

@@ -9,8 +9,7 @@
 #
 # The sandbox name comes from the directory name, so a second run from the
 # same cwd resumes the same omp session. $PWD is the workspace; agent state
-# (sessions, agent.db, memories) lives in the workspace at .omp-agent, and
-# ~/.omp is mounted only when the project opts into Bedrock.
+# (sessions, agent.db, memories) lives in the workspace at .omp-agent.
 ###############################################################################
 set -euo pipefail
 
@@ -52,30 +51,9 @@ if [ ${#OMP_ARGS[@]} -gt 0 ]; then set -- "${OMP_ARGS[@]}"; else set --; fi
 source "$REPO_DIR/sbx-preflight.sh"
 ensure_sbx "omp-sbx"
 
-# Agent state no longer needs a ~/.omp mount: PI_CODING_AGENT_DIR (spec.yaml)
-# points it into <workspace>/.omp-agent, which persists through the workspace
-# mount. ~/.omp is mounted ONLY for the Bedrock opt-in, which reads
-# ~/.omp/aws-config and shares ~/.omp/aws-sso-cache across sandboxes. The
-# opt-in flag is read from the project .env with the same parser the in-sandbox
-# entrypoint uses, so both sides agree on when the mount exists.
-read_env_value() {
-  local key="$1" file="$2" val
-  [ -f "$file" ] || return 0
-  val="$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$file" | head -1)"
-  val="${val%$'\r'}"
-  val="${val%\"}"; val="${val#\"}"
-  val="${val%\'}"; val="${val#\'}"
-  printf '%s' "$val"
-}
-
-AWS_SSO_PROFILE="$(read_env_value OMP_SBX_AWS_PROFILE "$(pwd)/.env")"
-
+# Agent state needs no mount at all: PI_CODING_AGENT_DIR (spec.yaml) points it
+# into <workspace>/.omp-agent, which persists through the workspace mount.
 MOUNTS=()
-if [ -n "$AWS_SSO_PROFILE" ] && [ -d "$HOME/.omp" ]; then
-  # The mount lands at the host's absolute path inside the sandbox (e.g.
-  # /Users/ww/.omp); OMP_SBX_HOST_HOME tells the entrypoint where to find it.
-  MOUNTS+=("$HOME/.omp" "--env" "OMP_SBX_HOST_HOME=$HOME")
-fi
 
 # In a linked worktree, .git is a file pointing at an absolute host path
 # inside the main repo. Mount the main repo too, at that same path, or git
@@ -138,12 +116,6 @@ log "${C_BOLD}${C_CYAN}╭─ omp-sbx ──────────────
 log "${C_CYAN}│${C_RST} template  : ${TEMPLATE}"
 log "${C_CYAN}│${C_RST} workspace : ${WORKDIR}  ${C_DIM}→ /home/agent/workspace${C_RST}"
 log "${C_CYAN}│${C_RST} agent dir : <workspace>/.omp-agent  ${C_DIM}(state, via PI_CODING_AGENT_DIR)${C_RST}"
-if [ -n "${AWS_SSO_PROFILE:-}" ] && [ -d "$HOME/.omp" ]; then
-  log "${C_CYAN}│${C_RST} bedrock   : ${HOME}/.omp  ${C_DIM}(aws-config + SSO cache, mounted)${C_RST}"
-fi
-if [ -d "$HOME/.config/gh" ]; then
-  log "${C_CYAN}│${C_RST} gh session: ${HOME}/.config/gh  ${C_DIM}(shared, via symlink)${C_RST}"
-fi
 if [ -n "${MAIN_REPO_ROOT:-}" ]; then
   log "${C_CYAN}│${C_RST} main repo : ${MAIN_REPO_ROOT}  ${C_DIM}(linked worktree, mounted rw)${C_RST}"
 fi

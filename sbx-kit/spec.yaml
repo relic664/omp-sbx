@@ -25,23 +25,14 @@ agentInstructions:
     nothing to log into or configure. If a model call fails auth, tell the
     user; the key is fixed on the host, not in here.
 
-    GitHub authentication is forwarded from the host: `gh` CLI commands work
-    directly, and `git push` over HTTPS uses the gh credential helper (no
-    separate token or SSH setup needed). If `gh auth status` fails, the host's
-    `~/.config/gh` is not mounted — recreate the sandbox with `omp-sbx --new`.
+    GitHub access is proxy-managed: the host-side sbx proxy injects the
+    credential into requests to github.com (git push/pull over HTTPS works with
+    no credential helper or SSH setup; api.github.com and the githubusercontent
+    zone are allowed too). If a git operation to github.com fails with 401, the
+    host's github secret is not registered — tell the user. GitHub API work
+    goes through MCP servers, not a `gh` CLI.
 
     `sudo` is passwordless; use it for system package installs.
-
-    Amazon Bedrock models are available only when the project `.env` sets
-    `OMP_SBX_AWS_PROFILE`. Credentials resolve through `credential_process`, so
-    the AWS CLI renews the short-lived access token on its own. Renewal stops
-    working once the SSO client registration lapses, which takes weeks. If an AWS
-    call reports an expired or missing token, run
-    `aws sso login --no-browser --use-device-code --profile "$OMP_SBX_AWS_PROFILE"`
-    and give the printed URL and code to the user to open - no browser runs inside
-    this sandbox, so never try to open it here. Keep `--use-device-code`: without
-    it the CLI prints a URL that redirects to a port inside this sandbox, which
-    the user's browser cannot reach.
 
     The omp `browser` tool (Puppeteer/Chromium) cannot spawn inside this microVM
     (ENOEXEC on the bundled chrome-linux64 binary). For browser automation use the
@@ -57,35 +48,17 @@ agentInstructions:
 permissions:
   network:
     allow:
-      # Model providers - add the ones you use
-      - "api.anthropic.com:443"
-      - "api.openai.com:443"
-      - "openrouter.ai:443"
-      - "*.openrouter.ai:443"
-      - "opencode.ai:443"
-      - "*.opencode.ai:443"
-      # Amazon Bedrock, us-east-1. Add the hosts for another region to use it.
-      - "bedrock-runtime.us-east-1.amazonaws.com:443"
-      - "bedrock.us-east-1.amazonaws.com:443"
-      # AWS SSO: oidc serves the device-code login, portal.sso hands out role
-      # credentials, sts answers get-caller-identity.
-      - "oidc.us-east-1.amazonaws.com:443"
-      - "portal.sso.us-east-1.amazonaws.com:443"
-      - "sts.us-east-1.amazonaws.com:443"
-      # omp release downloads and self-update
+      # GitHub: omp release downloads and self-update, plus git over HTTPS.
+      # Credential injection into these domains comes from the built-in
+      # `github` service when the host registers a secret for it
+      # (sbx secret set github --command 'gh auth token').
       - "github.com:443"
+      - "api.github.com:443"
       - "*.githubusercontent.com:443"
-      - "raw.githubusercontent.com:443"
-      # Package registries (npm, pip, cargo)
+      # Package registries (npm, pip)
       - "registry.npmjs.org:443"
       - "pypi.org:443"
       - "files.pythonhosted.org:443"
-      # Local model servers on the host
-      - "host.docker.internal:*"
-      # Docs and context providers
-      - "*.context7.com:443"
-      - "code.visualstudio.com:443"
-      - "*.cloudflare.com:443"
       # Playwright browser downloads
       - "cdn.playwright.dev:443"
       - "playwright.download.prss.microsoft.com:443"
@@ -99,16 +72,13 @@ environment:
     # creates the directory and git-excludes it. Deliberately not ".omp": the
     # harness reads a .omp directory in the workdir as project config.
     PI_CODING_AGENT_DIR: "/home/agent/workspace/.omp-agent"
-    # .omp resolves to ~/.omp, the symlink to the host config mount.
+    # .omp resolves to ~/.omp inside the sandbox; omp-init.sh keeps that path
+    # free of a real config dir, so the harness's own onboarding is used.
     PI_CONFIG_DIR: ".omp"
     HOME: "/home/agent"
-    GH_CONFIG_DIR: "/home/agent/.config/gh"
     AGENT_BROWSER_EXECUTABLE_PATH: "/usr/local/bin/chromium"
     # Keep validation on: sbx puts its proxy CA in the OS trust store.
     AGENT_BROWSER_IGNORE_HTTPS_ERRORS: "false"
-    # botocore ships its own CA bundle and ignores the OS trust store, so every
-    # AWS call fails against the sbx TLS proxy until it is pointed back at it.
-    AWS_CA_BUNDLE: "/etc/ssl/certs/ca-certificates.crt"
 
 setup:
   startup:
@@ -116,21 +86,6 @@ setup:
         - "bash"
         - "-c"
         - |
-          # ~/.config/gh is symlinked here rather than in omp-init.sh - this
-          # hook runs before omp, and the entrypoint only handles what omp
-          # reads at load time.
-          GH_HOST=$(mount | grep 'type virtiofs' | grep '/.config/gh ' | sed 's/.* on //; s/ type.*//' | head -1)
-          if [ -n "$GH_HOST" ] && [ "$GH_HOST" != "$HOME/.config/gh" ]; then
-            mkdir -p "$HOME/.config"
-            rm -rf "$HOME/.config/gh"
-            ln -sfn "$GH_HOST" "$HOME/.config/gh"
-          fi
-          # Point git at gh's credential helper, so `git push` over HTTPS uses
-          # the mounted session. hosts.yml is the only check possible here:
-          # `gh auth status` needs github.com, which may not be reachable yet.
-          if [ -f "$HOME/.config/gh/hosts.yml" ]; then
-            gh auth setup-git 2>/dev/null || true
-          fi
           # Trust WORKSPACE_DIR for the host mount path. Scanning `mount`
           # instead would also match /etc/hosts, another virtiofs mount.
           WS_HOST="${WORKSPACE_DIR:-}"
@@ -142,4 +97,4 @@ setup:
             exit 1
           fi
       user: "1000"
-      description: Symlink the gh mount and wire the credential helper
+      description: Symlink the workspace mount
