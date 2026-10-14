@@ -60,7 +60,6 @@ omp "fix the bug"      # one-shot prompt
 | Parallel | `omp-sbx-parallel` | Git worktree-based parallel sandbox launcher |
 | MCP import | `omp-sbx-mcp-import` | Registers Claude Code's MCP servers with sbx - see [MCP servers](#mcp-servers-from-claude-code) |
 | MCP gateway | `sbx-kit/omp-init.sh` | Opt-in wiring that connects omp to the sandbox's MCP gateway |
-| Browser CLI | `sbx-kit/Dockerfile` | Installs `agent-browser` (replaces Puppeteer, which can't spawn in sbx) |
 
 ### Config and state
 
@@ -200,23 +199,6 @@ omp starts LSP servers **lazily**, keyed on `fileTypes` matching actual files in
          - ".git"
    ```
 3. Rebuild + load (`./build.sh`), then start a fresh sandbox (`omp --new`).
-
-### Browser automation (agent-browser)
-
-The omp `browser` tool (Puppeteer/Chromium) **cannot spawn inside the sbx microVM** — the bundled `chrome-linux64` binary fails with `ENOEXEC`. The template instead ships [`agent-browser`](https://github.com/vercel-labs/agent-browser), a native Rust CLI, paired with a real Chromium installed via **Playwright** (which provides Linux ARM64 builds, unlike Chrome for Testing or Ubuntu's `chromium-browser` snap stub).
-
-```bash
-agent-browser open https://example.com      # launch + navigate
-agent-browser snapshot                       # accessibility tree with @eN refs
-agent-browser click @e2                      # click by ref
-agent-browser fill @e3 "text"                # fill input
-agent-browser screenshot page.png            # capture
-agent-browser close
-```
-
-The sbx TLS proxy intercepts HTTPS, so `AGENT_BROWSER_IGNORE_HTTPS_ERRORS=true` is set in `spec.yaml` to avoid cert errors. For **static content** (articles, docs, GitHub issues/PRs, JSON, PDFs) no browser is needed — the omp `read` tool fetches clean text/markdown from a URL directly. Reach for `agent-browser` only when JS execution or interaction is required.
-
-Changing the `agent-browser` or Playwright Chromium version requires a rebuild (`./build.sh`) + `omp --new`.
 
 ### Security
 

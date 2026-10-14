@@ -22,17 +22,8 @@ _pass() { echo "  PASS  $1"; PASS=$(( PASS + 1 )); }
 _fail() { echo "  FAIL  $1"; FAIL=$(( FAIL + 1 )); }
 _head() { echo; echo "── $1 ──"; }
 
-# ── 1. Env: cert-error bypass must be off ─────────────────────────────────────
-_head "1. AGENT_BROWSER_IGNORE_HTTPS_ERRORS"
-val="${AGENT_BROWSER_IGNORE_HTTPS_ERRORS:-}"
-if [ "$val" = "false" ] || [ -z "$val" ]; then
-  _pass "AGENT_BROWSER_IGNORE_HTTPS_ERRORS=${val:-<unset>}  (cert validation is enabled)"
-else
-  _fail "AGENT_BROWSER_IGNORE_HTTPS_ERRORS=${val}  (blanket bypass is ON — this is the bug)"
-fi
-
-# ── 2. Proxy CA cert exists ───────────────────────────────────────────────────
-_head "2. Proxy CA cert present at ${CA_CERT}"
+# ── 1. Proxy CA cert exists ───────────────────────────────────────────────────
+_head "1. Proxy CA cert present at ${CA_CERT}"
 if [ -f "$CA_CERT" ]; then
   subject=$(openssl x509 -noout -subject -in "$CA_CERT" 2>/dev/null | sed 's/subject=//')
   dates=$(openssl x509 -noout -dates -in "$CA_CERT" 2>/dev/null | tr '\n' '  ')
@@ -41,8 +32,8 @@ else
   _fail "File not found: ${CA_CERT}  (sbx did not inject the proxy CA)"
 fi
 
-# ── 3. Proxy CA is trusted by the OS bundle ───────────────────────────────────
-_head "3. Proxy CA trusted in OS bundle (${CA_BUNDLE})"
+# ── 2. Proxy CA is trusted by the OS bundle ───────────────────────────────────
+_head "2. Proxy CA trusted in OS bundle (${CA_BUNDLE})"
 if [ -f "$CA_CERT" ]; then
   if openssl verify -CAfile "$CA_BUNDLE" "$CA_CERT" >/dev/null 2>&1; then
     _pass "openssl verify OK  (proxy CA is in the trusted bundle)"
@@ -50,11 +41,11 @@ if [ -f "$CA_CERT" ]; then
     _fail "openssl verify FAILED  (proxy CA not in bundle — update-ca-certificates may not have run)"
   fi
 else
-  _fail "Skipped — CA cert not present (see check 2)"
+  _fail "Skipped — CA cert not present (see check 1)"
 fi
 
-# ── 4. Proxy env vars are set ─────────────────────────────────────────────────
-_head "4. Proxy env vars (HTTP_PROXY / HTTPS_PROXY)"
+# ── 3. Proxy env vars are set ─────────────────────────────────────────────────
+_head "3. Proxy env vars (HTTP_PROXY / HTTPS_PROXY)"
 http_proxy_val="${HTTP_PROXY:-${http_proxy:-}}"
 https_proxy_val="${HTTPS_PROXY:-${https_proxy:-}}"
 if [ -n "$http_proxy_val" ] && [ -n "$https_proxy_val" ]; then
@@ -63,8 +54,8 @@ else
   _fail "Proxy env vars missing  (HTTP_PROXY='${http_proxy_val}'  HTTPS_PROXY='${https_proxy_val}')"
 fi
 
-# ── 5a. Allowed domain: TLS chain validates through proxy ────────────────────
-_head "5a. TLS chain through proxy to ${ALLOWED_HOST} (allowed domain)"
+# ── 4a. Allowed domain: TLS chain validates through proxy ────────────────────
+_head "4a. TLS chain through proxy to ${ALLOWED_HOST} (allowed domain)"
 chain=$(echo | openssl s_client \
   -connect "${ALLOWED_HOST}:443" \
   -proxy "$PROXY" \
@@ -81,8 +72,8 @@ else
   _fail "Chain did NOT verify  |  ${rc_line:-no verify line found}"
 fi
 
-# ── 5b. Non-allowed domain: blocked by policy even through proxy ──────────────
-_head "5b. Non-allowed domain blocked through proxy (${BLOCKED_HOST})"
+# ── 4b. Non-allowed domain: blocked by policy even through proxy ──────────────
+_head "4b. Non-allowed domain blocked through proxy (${BLOCKED_HOST})"
 blocked_proxy=$(curl -sv --max-time 5 "https://${BLOCKED_HOST}" 2>&1) || true
 
 if echo "$blocked_proxy" | grep -qi "blocked by network policy"; then
@@ -96,10 +87,10 @@ else
   fi
 fi
 
-# ── 6a. Allowed domain reachable without proxy env ───────────────────────────
+# ── 5a. Allowed domain reachable without proxy env ───────────────────────────
 # sbx enforces the allow-list at the network level, so dropping the proxy env
 # vars must not change either verdict below.
-_head "6a. Allowed domain reachable without proxy env (${ALLOWED_HOST})"
+_head "5a. Allowed domain reachable without proxy env (${ALLOWED_HOST})"
 allowed_direct=$(env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \
   curl -sf --max-time 10 -o /dev/null -w "%{http_code}" "https://${ALLOWED_HOST}" 2>&1) || true
 
@@ -109,8 +100,8 @@ else
   _fail "https://${ALLOWED_HOST} unreachable without proxy env (got: '${allowed_direct}') — expected allowed domain to be reachable"
 fi
 
-# ── 6b. Non-allowed domain blocked even without proxy env ─────────────────────
-_head "6b. Non-allowed domain blocked without proxy env (${BLOCKED_HOST})"
+# ── 5b. Non-allowed domain blocked even without proxy env ─────────────────────
+_head "5b. Non-allowed domain blocked without proxy env (${BLOCKED_HOST})"
 blocked_direct=$(env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \
   curl -sv --max-time 5 "https://${BLOCKED_HOST}" 2>&1) || true
 
@@ -134,14 +125,12 @@ echo
 
 if [ "$FAIL" -gt 0 ]; then
   echo "  One or more checks failed."
-  echo "  If AGENT_BROWSER_IGNORE_HTTPS_ERRORS is not 'false', rebuild from the"
-  echo "  hardened spec.yaml and recreate the sandbox."
   echo "  If the proxy CA is missing, check sbx startup logs — it should inject"
   echo "  /usr/local/share/ca-certificates/proxy-ca.crt before the agent starts."
   echo
   exit 1
 else
-  echo "  All checks passed. The sandbox is using proper TLS trust, not a blanket bypass."
+  echo "  All checks passed. The sandbox trusts the sbx proxy CA and network policy is enforced."
   echo
   exit 0
 fi

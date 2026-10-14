@@ -4,8 +4,8 @@
 #
 # The base image (docker/sandbox-templates:shell-nightly) supplies Ubuntu, the
 # non-root `agent` user, Node, Python, Go, Java, git and the sbx microVM
-# security model. This adds the omp binary, bun, uv, LSP servers,
-# agent-browser and the dev tools the shell template leaves out.
+# security model. This adds the omp binary, bun, uv, LSP servers and the dev
+# tools the shell template leaves out.
 #
 # Build and load with ./build.sh.
 ###############################################################################
@@ -14,14 +14,10 @@ FROM docker/sandbox-templates:shell-nightly
 
 USER root
 
-# ── Dev tools and Chromium's shared libraries ────────────────────────────────
+# ── Dev tools ────────────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
       fd-find fzf sqlite3 build-essential pkg-config libssl-dev \
       unzip xz-utils file less procps \
-      libglib2.0-0t64 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 \
-      libxcb1 libxkbcommon0 libasound2t64 libgbm1 libx11-6 libxext6 \
-      libcairo2 libpango-1.0-0 libxcomposite1 libxdamage1 libxfixes3 \
-      libxrandr2 libatspi2.0-0t64 libnss3 libnspr4 libdrm2 \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd
 
@@ -40,20 +36,6 @@ ENV PATH="/home/agent/.local/bin:${PATH}"
 RUN npm install -g pyright typescript-language-server typescript bash-language-server
 RUN go install golang.org/x/tools/gopls@latest
 ENV PATH="/home/agent/go/bin:${PATH}"
-
-# ── agent-browser + Chromium (Playwright build) ──────────────────────────────
-# The omp `browser` tool cannot spawn its bundled Chromium in the microVM
-# (ENOEXEC), and Ubuntu's chromium-browser package is a snap stub that also
-# fails in containers. Playwright's Chromium is a real ARM64 build, and
-# agent-browser drives it through AGENT_BROWSER_EXECUTABLE_PATH.
-RUN npm install -g agent-browser
-RUN npx playwright@1.61.1 install chromium
-# The glob resolves once the download above completes.
-USER root
-RUN ln -sf /home/agent/.cache/ms-playwright/chromium-*/chrome-linux/chrome \
-           /usr/local/bin/chromium
-USER agent
-ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/local/bin/chromium
 
 # ── omp prebuilt binary ──────────────────────────────────────────────────────
 # The `omp --version` smoke test creates /home/agent/.omp on the way out. That
