@@ -6,9 +6,9 @@ agent: omp
 kits:
   - ${OMP_SBXENV_KIT_DIR}
 workspace: ${OMP_SBXENV_WORKSPACE}
-additionalWorkspaces:
-  # Host ~/.omp keeps sessions, skills and memories across restarts. It has
-  # to exist: `sbx env create` prompts for a missing path, so CI hangs.
-  - path: ${HOME}/.omp
+# No ~/.omp in additionalWorkspaces: agent state (agent.db, sessions,
+# memories, managed-skills) lives in the workspace itself, via the kit's
+# PI_CODING_AGENT_DIR. Bedrock opt-in projects run omp-sbx instead - a static
+# env file cannot conditionally mount ~/.omp.
 sandboxOptions:
   template: omp-sbx:latest

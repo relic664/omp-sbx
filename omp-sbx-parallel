@@ -79,11 +79,6 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ ! -d "$HOME/.omp" ]; then
-  log "${C_RED}omp-sbx-parallel: host config dir not found: $HOME/.omp${C_RST}"
-  exit 1
-fi
-
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 REPO_BASE="$(basename "$REPO_ROOT")"
 CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
@@ -266,7 +261,7 @@ log "${C_CYAN}│${C_RST} template  : ${TEMPLATE}"
 log "${C_CYAN}│${C_RST} repo      : ${REPO_ROOT}"
 log "${C_CYAN}│${C_RST} branch    : ${BRANCH}  ${C_DIM}(from ${CURRENT_BRANCH})${C_RST}"
 log "${C_CYAN}│${C_RST} worktree  : ${WORKTREE_PATH}  ${C_DIM}→ /home/agent/workspace${C_RST}"
-log "${C_CYAN}│${C_RST} config    : ${HOME}/.omp  ${C_DIM}(shared, via symlink)${C_RST}"
+log "${C_CYAN}│${C_RST} agent dir : <worktree>/.omp-agent  ${C_DIM}(per-worktree state)${C_RST}"
 log "${C_CYAN}│${C_RST} sandbox   : ${SANDBOX_NAME}"
 if [ "$#" -eq 0 ]; then
   log "${C_CYAN}│${C_RST} mode      : ${C_GREEN}interactive TUI${C_RST}"
@@ -362,7 +357,7 @@ if [ "$#" -eq 0 ] && [ -t 0 ]; then
     # sandbox does exist (a force-quit left it stopped) and attaching will
     # find it. Any other failure is real.
     if create_out="$(sbx create --template "$TEMPLATE" --name "$SANDBOX_NAME" \
-        "$KIT_DIR" "$WORKTREE_PATH" "$HOME/.omp" "${REPO_ROOT}/.git" 2>&1)"; then
+        "$KIT_DIR" "$WORKTREE_PATH" "${REPO_ROOT}/.git" 2>&1)"; then
       if [ -n "$create_out" ]; then printf '%s\n' "$create_out" >&2; fi
       sleep 2
     else
@@ -385,7 +380,7 @@ if [ "$#" -eq 0 ] && [ -t 0 ]; then
 
   # A force-quit can wedge the agent process, so escalate on failure - restart
   # the sandbox, then recreate it. The conversation resumes either way, because
-  # session state lives in the shared ~/.omp mount.
+  # session state lives in the worktree at .omp-agent.
   if ! sbx run --name "$SANDBOX_NAME" 2>&1; then
     log "${C_DIM}omp-sbx-parallel: re-attach failed; restarting sandbox...${C_RST}"
     sbx stop "$SANDBOX_NAME" >/dev/null 2>&1 || true
@@ -393,7 +388,7 @@ if [ "$#" -eq 0 ] && [ -t 0 ]; then
       log "${C_DIM}omp-sbx-parallel: sandbox unresponsive, recreating...${C_RST}"
       sbx rm -f "$SANDBOX_NAME" >/dev/null 2>&1 || true
       if ! sbx create --template "$TEMPLATE" --name "$SANDBOX_NAME" \
-          "$KIT_DIR" "$WORKTREE_PATH" "$HOME/.omp" "${REPO_ROOT}/.git" 2>&1; then
+          "$KIT_DIR" "$WORKTREE_PATH" "${REPO_ROOT}/.git" 2>&1; then
         log "${C_RED}omp-sbx-parallel: failed to create sandbox${C_RST}"
         exit 1
       fi
@@ -407,7 +402,7 @@ else
     # the name, and sbx exec starts a stopped sandbox anyway. Real errors show
     # up there.
     if ! sbx create --template "$TEMPLATE" --name "$SANDBOX_NAME" \
-        "$KIT_DIR" "$WORKTREE_PATH" "$HOME/.omp" "${REPO_ROOT}/.git" >/dev/null 2>&1; then
+        "$KIT_DIR" "$WORKTREE_PATH" "${REPO_ROOT}/.git" >/dev/null 2>&1; then
       :
     else
       sleep 2

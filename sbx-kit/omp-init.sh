@@ -5,26 +5,24 @@
 # hook runs in parallel with omp itself and can lose that race.
 set -euo pipefail
 
-# ── Host config mount symlink ────────────────────────────────────────────────
-# The host ~/.omp lands at its own absolute path (e.g. /Users/ww/.omp), so
-# ~/.omp has to point at it.
+# ── Workspace-local agent state ──────────────────────────────────────────────
+# PI_CODING_AGENT_DIR (set in spec.yaml) redirects every agent artifact -
+# agent.db, history.db, models.yml, sessions, memories, managed-skills - into
+# <workspace>/.omp-agent, so state persists on the host through the workspace
+# mount alone. The harness resolves the override unconditionally (DirResolver
+# in pi-utils/src/dirs.ts), before its .env handling; no migration step.
 #
-# Both flags matter. Replace a real directory rather than symlinking into it:
-# plain `ln -s` onto an existing directory nests the link (~/.omp/.omp) and omp
-# then reads an empty local config, re-running first-time setup. -n covers the
-# same hazard on a second launch, where ~/.omp is already the symlink: without
-# it ln follows the link and writes the nested one into the host config dir.
-OMP_HOST="$(awk '/virtiofs/{print $2}' /proc/mounts | grep '/\.omp$' | head -1 || true)"
-if [ -n "$OMP_HOST" ] && [ "$OMP_HOST" != "$HOME/.omp" ]; then
-  if [ -e "$HOME/.omp" ] && [ ! -L "$HOME/.omp" ]; then
-    rm -rf "$HOME/.omp"
-  fi
-  ln -sfn "$OMP_HOST" "$HOME/.omp"
-  # A .omp inside the config dir can only be that self-reference, and it makes
-  # a config lookup ambiguous.
-  if [ -L "$OMP_HOST/.omp" ]; then
-    rm -f "$OMP_HOST/.omp"
-  fi
+# Not .omp: the harness treats a .omp directory in the workdir as the
+# project-config root (RULES.md, mcp.json, extension roots), and sessions
+# landing there would read back as project config.
+OMP_AGENT_DIR="/home/agent/workspace/.omp-agent"
+mkdir -p "$OMP_AGENT_DIR"
+
+# Keep the state dir out of commits without touching the project's .gitignore:
+# info/exclude is local to this clone, so the kit can append freely.
+if [ -d "/home/agent/workspace/.git" ] && [ -w "/home/agent/workspace/.git/info" ]; then
+  grep -qs '^\.omp-agent/$' /home/agent/workspace/.git/info/exclude 2>/dev/null || \
+    echo '.omp-agent/' >> /home/agent/workspace/.git/info/exclude
 fi
 
 # ── Unsubstituted GH_TOKEN placeholder ──────────────────────────────────────
@@ -40,12 +38,18 @@ esac
 # ── Amazon Bedrock via AWS SSO (opt-in) ─────────────────────────────────────
 # A project opts in with OMP_SBX_AWS_PROFILE=<profile> in its .env. The profile
 # is defined in ~/.omp/aws-config on the host, which holds no secrets - only a
-# start URL, account id and role name - and is shared by every project.
+# start URL, account id and role name - and is shared by every project. The
+# launcher bind-mounts ~/.omp only when this opt-in is present; without it the
+# sandbox sees no ~/.omp at all.
 #
 # The generated profile reaches its credentials through the AWS CLI rather than
 # naming the SSO profile directly. omp reads the SSO access token but not the
 # refresh token stored beside it, so it treats an expired session as fatal; the
 # CLI renews from that refresh token with no browser and no prompt.
+#
+# aws-config is read through OMP_SBX_HOST_HOME when the launcher passes it
+# (the mount lands at the host's absolute path, not under $HOME); it falls
+# back to $HOME/.omp for launches that still mount it there.
 env_value() {
   local key="$1" file="$2" val
   val="$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$file" | head -1)"
@@ -67,7 +71,11 @@ if [ -f "$WORKSPACE_ENV" ]; then
 fi
 
 if [ -n "$AWS_SSO_PROFILE" ]; then
-  AWS_CONFIG_SRC="$HOME/.omp/aws-config"
+  # The launcher passes OMP_SBX_HOST_HOME=$HOME (host) when it mounts ~/.omp;
+  # the mount lands at the host's absolute path inside the sandbox, not under
+  # the container $HOME. Fall back to $HOME/.omp for older launchers.
+  OMP_HOST_HOME="${OMP_SBX_HOST_HOME:-$HOME}"
+  AWS_CONFIG_SRC="$OMP_HOST_HOME/.omp/aws-config"
   if [ ! -f "$AWS_CONFIG_SRC" ]; then
     echo "omp-sbx: OMP_SBX_AWS_PROFILE=$AWS_SSO_PROFILE needs a profile definition in ~/.omp/aws-config" >&2
   else
@@ -92,7 +100,7 @@ if [ -n "$AWS_SSO_PROFILE" ]; then
     # Both flags matter, for the reason the ~/.omp symlink above does: replace
     # a real directory rather than nesting a link inside it, and -n covers a
     # second launch where ~/.aws/sso/cache is already the symlink.
-    SSO_CACHE_SHARED="$HOME/.omp/aws-sso-cache"
+    SSO_CACHE_SHARED="$OMP_HOST_HOME/.omp/aws-sso-cache"
     mkdir -p "$SSO_CACHE_SHARED" "$HOME/.aws/sso"
     if [ -e "$HOME/.aws/sso/cache" ] && [ ! -L "$HOME/.aws/sso/cache" ]; then
       rm -rf "$HOME/.aws/sso/cache"

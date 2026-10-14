@@ -4,14 +4,15 @@
 
 # omp-sbx Oh My Pi Sandbox
 
-Run the [omp coding agent](https://omp.sh) (oh-my-pi) inside a [Docker sbx](https://docs.docker.com/ai/sandboxes/) sandbox with host configs shared.
+Run the [omp coding agent](https://omp.sh) (oh-my-pi) inside a [Docker sbx](https://docs.docker.com/ai/sandboxes/) sandbox.
 
 ## What it does
 
 - Launches omp inside a Docker sbx microVM — sbx handles all security (non-root user, network policies, secret proxy, resource limits)
-- Bind-mounts your `~/.omp` (agent.db, managed-skills, memories, sessions) so state persists across sandbox restarts
+- Keeps agent state (agent.db, models.yml, sessions, memories, managed-skills) **in the workspace itself**, via `PI_CODING_AGENT_DIR=<workspace>/.omp-agent` — it persists across sandbox restarts through the workspace mount, no separate mount needed
+- Provider credentials (`OPENAI_API_KEY`, optional `OPENAI_BASE_URL`) are planned to be injected at launch from the host environment — nothing logged into or stored inside the sandbox. See [docs/trimming-and-injection.md](docs/trimming-and-injection.md) for the injection plan (env at create now, sbx secret + proxy later)
 - Sandboxes are per-directory: running from the same cwd reconnects to the same sandbox
-- Recovers automatically after a force-quit: if the sandbox is left stopped (or its agent wedged), the launcher re-attaches, then stops+restarts, and as a last resort recreates the sandbox — your omp session resumes from the shared `~/.omp` either way
+- Recovers automatically after a force-quit: if the sandbox is left stopped (or its agent wedged), the launcher re-attaches, then stops+restarts, and as a last resort recreates the sandbox — your omp session resumes from the workspace state either way
 - `--new` flag forces a fresh sandbox
 
 ## Prerequisites
@@ -41,7 +42,7 @@ echo "alias omp='omp-sbx'" >> ~/.zshrc
 ## Usage
 
 ```bash
-omp                    # interactive TUI (cwd = workspace, ~/.omp shared)
+omp                    # interactive TUI (cwd = workspace, state in .omp-agent)
 omp --new              # destroy + create fresh sandbox
 omp --yes              # skip the pre-launch "press any key" pause
 omp --version          # passthrough flags to omp
@@ -64,9 +65,23 @@ omp "fix the bug"      # one-shot prompt
 | Bedrock login | `omp-sbx-aws-login` | Host-side SSO login, shared with every sandbox via `~/.omp/aws-sso-cache` |
 | SSO nudge | `sbx-kit/extensions/aws-sso-nudge.ts` | omp extension: warns before the SSO login lapses, adds `/aws-login` |
 
-### Config sharing
+### Config and state
 
-sbx mounts additional workspaces at their **host path** inside the container (e.g. `/Users/<user>/.omp`). The kit's startup command symlinks this to `/home/agent/.omp` so omp's `PI_CONFIG_DIR=.omp` resolves correctly.
+Agent state (agent.db, sessions, memories, managed-skills, models.yml) lives
+in `<workspace>/.omp-agent`, pointed there by `PI_CODING_AGENT_DIR` in the
+kit. It persists on the host through the workspace mount and is git-excluded
+locally via `.git/info/exclude` (the entrypoint appends it; your committed
+`.gitignore` is untouched). Each project — and each parallel worktree — has
+its own state, including its own model preferences.
+
+A project's provider key comes from the host environment at create time
+(`OPENAI_API_KEY`, `OPENAI_BASE_URL` if set). No auth storage is shared or
+persisted in the sandbox.
+
+`~/.omp` on the host is mounted **only** when a project opts into Amazon
+Bedrock (see below), which reads `~/.omp/aws-config` and shares
+`~/.omp/aws-sso-cache`. Everything else that used to live in `~/.omp` either
+followed the agent-dir redirect or is not needed.
 
 ### GitHub auth forwarding
 
@@ -174,8 +189,11 @@ sso_role_name = Bedrock-Invoke-Only
 region = us-east-1
 ```
 
-`~/.omp` is already bind-mounted, so editing `aws-config` takes effect on the
-next session - no rebuild.
+`~/.omp` is bind-mounted for Bedrock projects only — the launcher reads
+`OMP_SBX_AWS_PROFILE` from the project `.env` before create, so editing
+`aws-config` takes effect on the next session - no rebuild. Note the mount
+decision is made at create time: adding or removing the opt-in needs
+`omp --new`.
 
 **Log in once, from the host, and every sandbox shares it.** Run:
 
@@ -191,9 +209,10 @@ recreated with `--new`, picks up an already-valid session immediately; nothing
 about the token needs redoing per sandbox.
 
 Unlike `aws-config` above, this directory does hold something live: a
-refreshable SSO session, scoped to the role in that profile. Sharing it is the
-same trust boundary `~/.omp` already carries for everything else in it - one
-identity, shared across this host's own sandboxes.
+refreshable SSO session, scoped to the role in that profile. Sharing it puts
+a live (but role-scoped, non-admin) AWS credential inside the sandbox - the
+one deliberate exception to the no-persistent-credentials rule, and the
+reason the mount is opt-in.
 
 A sandbox can still log in on its own if you'd rather not leave it: run
 `/aws-login` once the session starts, which the nudge extension below handles
@@ -261,9 +280,10 @@ The template ships with language servers for Python (`pyright`), TypeScript/Java
 | Part | Location | Rebuild needed? |
 |---|---|---|
 | Binary install | `sbx-kit/Dockerfile` (the `LSP servers` section) | Yes — `./build.sh` |
-| Server registration | `~/.omp/lsp.yml` on the host | No — live via `~/.omp` bind mount |
+| Server registration | `<workspace>/.omp-agent/lsp.yml` (per project) or `~/.omp/lsp.yml` on the host | Workspace copy: no; host copy: only for Bedrock projects (that is the only case `~/.omp` is mounted) |
 
-`lsp.yml` is bind-mounted into the sandbox, so editing it takes effect immediately on the next session. Adding or changing a *binary* requires a rebuild + `omp --new`.
+`lsp.yml` lives in the agent dir, which is the workspace-local `.omp-agent` —
+editing it takes effect immediately on the next session. Adding or changing a *binary* requires a rebuild + `omp --new`.
 
 #### Lazy loading
 
@@ -274,7 +294,7 @@ omp starts LSP servers **lazily**, keyed on `fileTypes` matching actual files in
 #### Adding a server
 
 1. Install the binary in `sbx-kit/Dockerfile` — append to the global `npm install` line for npm packages, or add a separate `RUN` step for non-npm servers (`go install`, `cargo install`, etc.).
-2. Register the server in `~/.omp/lsp.yml`:
+2. Register the server in `<workspace>/.omp-agent/lsp.yml`:
    ```yaml
      gopls:
        command: gopls
@@ -385,6 +405,8 @@ placeholders for real.
   path that may not exist on every host, and `sbx env create` prompts
   interactively — hanging in non-interactive/CI contexts — if
   `additionalWorkspaces` points at a missing directory.
+- No Bedrock support — `~/.omp` (aws-config + SSO cache) is mounted only when
+  a project's `.env` opts in, which a static file cannot express.
 - Re-running `sbx env run` on an existing environment only re-applies
   env/MCP changes; other `.sbxenv.yaml` edits need `--new`.
 

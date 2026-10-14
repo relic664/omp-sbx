@@ -8,8 +8,9 @@
 #   omp-sbx "fix the bug"   one-shot prompt
 #
 # The sandbox name comes from the directory name, so a second run from the
-# same cwd resumes the same omp session. $PWD is the workspace; $HOME/.omp
-# is mounted at its host path and symlinked into place by omp-init.sh.
+# same cwd resumes the same omp session. $PWD is the workspace; agent state
+# (sessions, agent.db, memories) lives in the workspace at .omp-agent, and
+# ~/.omp is mounted only when the project opts into Bedrock.
 ###############################################################################
 set -euo pipefail
 
@@ -51,16 +52,29 @@ if [ ${#OMP_ARGS[@]} -gt 0 ]; then set -- "${OMP_ARGS[@]}"; else set --; fi
 source "$REPO_DIR/sbx-preflight.sh"
 ensure_sbx "omp-sbx"
 
-if [ ! -d "$HOME/.omp" ]; then
-  log "${C_RED}omp-sbx: host config dir not found: $HOME/.omp${C_RST}"
-  exit 1
-fi
+# Agent state no longer needs a ~/.omp mount: PI_CODING_AGENT_DIR (spec.yaml)
+# points it into <workspace>/.omp-agent, which persists through the workspace
+# mount. ~/.omp is mounted ONLY for the Bedrock opt-in, which reads
+# ~/.omp/aws-config and shares ~/.omp/aws-sso-cache across sandboxes. The
+# opt-in flag is read from the project .env with the same parser the in-sandbox
+# entrypoint uses, so both sides agree on when the mount exists.
+read_env_value() {
+  local key="$1" file="$2" val
+  [ -f "$file" ] || return 0
+  val="$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$file" | head -1)"
+  val="${val%$'\r'}"
+  val="${val%\"}"; val="${val#\"}"
+  val="${val%\'}"; val="${val#\'}"
+  printf '%s' "$val"
+}
 
-# Mounting the host gh session is what makes `gh` and `git push` work inside
-# the sandbox.
-MOUNTS=("$HOME/.omp")
-if [ -d "$HOME/.config/gh" ]; then
-  MOUNTS+=("$HOME/.config/gh")
+AWS_SSO_PROFILE="$(read_env_value OMP_SBX_AWS_PROFILE "$(pwd)/.env")"
+
+MOUNTS=()
+if [ -n "$AWS_SSO_PROFILE" ] && [ -d "$HOME/.omp" ]; then
+  # The mount lands at the host's absolute path inside the sandbox (e.g.
+  # /Users/ww/.omp); OMP_SBX_HOST_HOME tells the entrypoint where to find it.
+  MOUNTS+=("$HOME/.omp" "--env" "OMP_SBX_HOST_HOME=$HOME")
 fi
 
 # In a linked worktree, .git is a file pointing at an absolute host path
@@ -123,7 +137,10 @@ fi
 log "${C_BOLD}${C_CYAN}╭─ omp-sbx ─────────────────────────────────────────────────╮${C_RST}"
 log "${C_CYAN}│${C_RST} template  : ${TEMPLATE}"
 log "${C_CYAN}│${C_RST} workspace : ${WORKDIR}  ${C_DIM}→ /home/agent/workspace${C_RST}"
-log "${C_CYAN}│${C_RST} config    : ${HOME}/.omp  ${C_DIM}(shared, via symlink)${C_RST}"
+log "${C_CYAN}│${C_RST} agent dir : <workspace>/.omp-agent  ${C_DIM}(state, via PI_CODING_AGENT_DIR)${C_RST}"
+if [ -n "${AWS_SSO_PROFILE:-}" ] && [ -d "$HOME/.omp" ]; then
+  log "${C_CYAN}│${C_RST} bedrock   : ${HOME}/.omp  ${C_DIM}(aws-config + SSO cache, mounted)${C_RST}"
+fi
 if [ -d "$HOME/.config/gh" ]; then
   log "${C_CYAN}│${C_RST} gh session: ${HOME}/.config/gh  ${C_DIM}(shared, via symlink)${C_RST}"
 fi
@@ -151,7 +168,7 @@ if [ "$#" -eq 0 ] && [ -t 0 ]; then
     # sandbox does exist (a force-quit left it stopped) and attaching will
     # find it. Any other failure is real.
     if create_out="$(sbx create "${CREATE_OPTS[@]}" --name "$SANDBOX_NAME" \
-        "$KIT_DIR" "$WORKDIR" "${MOUNTS[@]}" 2>&1)"; then
+        "$KIT_DIR" "$WORKDIR" $([ ${#MOUNTS[@]} -gt 0 ] && printf '%s\n' "${MOUNTS[@]}") 2>&1)"; then
       if [ -n "$create_out" ]; then printf '%s\n' "$create_out" >&2; fi
       # Let the startup hook finish its symlinks.
       sleep 2
@@ -177,7 +194,7 @@ if [ "$#" -eq 0 ] && [ -t 0 ]; then
   # sandbox's own spec on re-attach, so passing it again changes nothing. A
   # force-quit can wedge the agent process, so escalate on failure - restart
   # the sandbox, then recreate it. The conversation resumes either way,
-  # because session state lives in the shared ~/.omp mount.
+  # because session state lives in the workspace at .omp-agent.
   if ! sbx run --name "$SANDBOX_NAME" 2>&1; then
     log "${C_DIM}omp-sbx: re-attach failed; restarting sandbox...${C_RST}"
     sbx stop "$SANDBOX_NAME" >/dev/null 2>&1 || true
@@ -185,7 +202,7 @@ if [ "$#" -eq 0 ] && [ -t 0 ]; then
       log "${C_DIM}omp-sbx: sandbox unresponsive, recreating...${C_RST}"
       sbx rm -f "$SANDBOX_NAME" >/dev/null 2>&1 || true
       if ! sbx create "${CREATE_OPTS[@]}" --name "$SANDBOX_NAME" \
-          "$KIT_DIR" "$WORKDIR" "${MOUNTS[@]}" 2>&1; then
+          "$KIT_DIR" "$WORKDIR" $([ ${#MOUNTS[@]} -gt 0 ] && printf '%s\n' "${MOUNTS[@]}") 2>&1; then
         log "${C_RED}omp-sbx: failed to create sandbox${C_RST}"
         exit 1
       fi
@@ -199,7 +216,7 @@ else
     # the name, and sbx exec starts a stopped sandbox anyway. Real errors show
     # up there.
     if ! sbx create "${CREATE_OPTS[@]}" --name "$SANDBOX_NAME" \
-        "$KIT_DIR" "$WORKDIR" "${MOUNTS[@]}" >/dev/null 2>&1; then
+        "$KIT_DIR" "$WORKDIR" $([ ${#MOUNTS[@]} -gt 0 ] && printf '%s\n' "${MOUNTS[@]}") >/dev/null 2>&1; then
       :
     else
       sleep 2

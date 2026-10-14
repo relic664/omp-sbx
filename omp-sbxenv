@@ -13,6 +13,8 @@
 #   - no recovery cascade after a force-quit, just create-or-reuse
 #   - no ~/.config/gh forwarding: a static file cannot skip a mount that some
 #     hosts lack, and sbx prompts (so CI hangs) on a missing directory
+#   - no Bedrock support: ~/.omp (aws-config + SSO cache) is mounted only when
+#     a project's .env opts in, which a static file cannot express
 #   - `sbx env run` on an existing environment only re-applies env and MCP
 #     changes, so other .sbxenv.yaml edits need --new
 ###############################################################################
@@ -37,11 +39,6 @@ log() { printf '%s\n' "$*" >&2; }
 # shellcheck source=sbx-preflight.sh
 source "$REPO_DIR/sbx-preflight.sh"
 ensure_sbx "omp-sbxenv"
-
-if [ ! -d "$HOME/.omp" ]; then
-  log "${C_RED}omp-sbxenv: host config dir not found: $HOME/.omp${C_RST}"
-  exit 1
-fi
 
 # Values referenced by ${VAR} in sbx-kit/.sbxenv.yaml.
 export OMP_SBXENV_KIT_DIR="$KIT_DIR"
