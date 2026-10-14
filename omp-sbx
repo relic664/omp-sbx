@@ -75,8 +75,7 @@ fi
 # ── Host MCP servers (opt-in) ────────────────────────────────────────────────
 # sbx serves its registered MCP servers to the sandbox through a gateway, so a
 # stdio server runs on the host and a remote server's OAuth token stays there.
-# Register them from the Claude Code config with omp-sbx-mcp-import, then name
-# the set here:
+# Register them on the host with `sbx mcp add`, then name the set here:
 #
 #   OMP_SBX_STATIC_MCP=notion,atlassian omp-sbx --new
 #

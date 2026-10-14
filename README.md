@@ -57,8 +57,6 @@ omp "fix the bug"      # one-shot prompt
 | Kit | `sbx-kit/spec.yaml` | Defines omp entrypoint, network allow-list, env, agent context |
 | Env (experimental) | `sbx-kit/.sbxenv.yaml` + `omp-sbxenv` | Declarative alternative launcher for scripted/CI use — see [Scripted / CI use](#scripted--ci-use-experimental) |
 | Launcher | `omp-sbx` | Wrapper handling banner, sandbox lifecycle, resume vs new |
-| Parallel | `omp-sbx-parallel` | Git worktree-based parallel sandbox launcher |
-| MCP import | `omp-sbx-mcp-import` | Registers Claude Code's MCP servers with sbx - see [MCP servers](#mcp-servers-from-claude-code) |
 | MCP gateway | `sbx-kit/omp-init.sh` | Opt-in wiring that connects omp to the sandbox's MCP gateway |
 
 ### Config and state
@@ -67,8 +65,8 @@ Agent state (agent.db, sessions, memories, managed-skills, models.yml) lives
 in `<workspace>/.omp-agent`, pointed there by `PI_CODING_AGENT_DIR` in the
 kit. It persists on the host through the workspace mount and is git-excluded
 locally via `.git/info/exclude` (the entrypoint appends it; your committed
-`.gitignore` is untouched). Each project — and each parallel worktree — has
-its own state, including its own model preferences.
+`.gitignore` is untouched). Each project directory has its own state,
+including its own model preferences.
 
 A project's provider key comes from the host environment at create time
 (`OPENAI_API_KEY`, `OPENAI_BASE_URL` if set). No auth storage is shared or
@@ -110,39 +108,37 @@ git push                                                 # 401 means no secret r
 If a git operation to github.com returns 401, check `sbx secret ls` — the
 proxy injects nothing when the `github` service has no stored secret.
 
-### MCP servers from Claude Code
+### MCP servers
+
+sbx keeps its own MCP registry on the host and serves it to a sandbox through
+a gateway. Register servers directly with `sbx mcp add` — no import tool
+needed:
 
 ```bash
-omp-sbx-mcp-import --dry-run   # read ~/.claude.json, print the plan
-omp-sbx-mcp-import --auth      # register, then authorize the remote ones
-omp-sbx-mcp-import --load      # attach them to this directory's sandbox
+sbx mcp add searxng --command searxng-mcp --args "--host" --args "localhost"   # stdio, runs on the host
+sbx mcp add notion --url https://mcp.notion.com/mcp --skip_auth                # remote; OAuth later
+sbx mcp auth notion                                                            # opens a host browser
 ```
 
-sbx keeps its own MCP registry and serves it to a sandbox through a gateway.
-`omp-sbx-mcp-import` copies the servers out of `~/.claude.json` (plus a project
-`.mcp.json`, or any `--file`) into that registry. It is idempotent: a second run
-reports what already exists and changes nothing.
-
-**Why not just mount the Claude config.** Registering is a host-side act, and
-that is the point. A local stdio server runs on the host, and a remote server's
-OAuth flow opens a host browser - so the credential never enters the sandbox,
-which has no keychain and no browser to offer.
+**Why the sandbox never sees a credential.** A stdio server runs on the host,
+and a remote server's OAuth token stays there. The sandbox reaches the server
+through the gateway URL, not the credential — a microVM has no keychain and no
+browser to offer.
 
 **Two ways to reach a sandbox, and they do not mix:**
 
 | Route | Command | Trade |
 |---|---|---|
-| Live attach | `omp-sbx-mcp-import --load` | No restart; the agent also gets the gateway's `mcp-add` / `mcp-find` |
+| Live attach | `sbx mcp load searxng --sandbox omp-<dir>` | No restart; the agent also gets the gateway's `mcp-add` / `mcp-find` |
 | Fixed at create | `OMP_SBX_STATIC_MCP=notion,searxng omp-sbx --new` | Set cannot change without `--new`; the agent cannot register more |
 
 Loading into a sandbox created with `--static-mcp` misbehaves - the second load
 appears to replace the first rather than add to it. Pick one route.
 
-**What does not carry over.** `sbx mcp add` has no `--env`, so a server that
-reads its config from the environment gets wrapped in `env VAR=value <command>`.
-The values stay on the host, and the script prints them as `VAR=...` rather than
-echoing a secret. A server whose own binary fails to start on the host fails
-here too, and the attach step reports the reason.
+**Env vars for stdio servers.** `sbx mcp add` has no `--env`, so a server that
+reads its config from the environment gets wrapped: `sbx mcp add myserver
+--command env --args "API_KEY=..." --args myserver`. The value stays on the
+host; the server runs there and the sandbox reaches it through the gateway.
 
 #### Letting omp see them
 
@@ -212,55 +208,10 @@ All security is handled by the sbx microVM — no manual `cap_drop`, `gosu`, `um
 | Secrets | Proxy injects keys (never enter sandbox) |
 | Resource limits | `sbx run --memory --cpus` |
 
-## Parallel sessions (git worktrees)
-
-`omp-sbx-parallel` creates a git worktree on a separate branch and launches a dedicated sandbox for it. Run it multiple times to work on multiple tasks in parallel — each gets its own worktree, branch, and sandbox.
-
-```bash
-omp-sbx-parallel                          # interactive: pick existing branch or create new
-omp-sbx-parallel --new fix-auth-bug       # create new branch + worktree + sandbox
-omp-sbx-parallel --branch feature-x       # use existing branch in a new worktree
-```
-
-On exit (interactive mode), you're offered cleanup:
-1. Merge the branch into your current branch and remove the worktree
-2. Remove the worktree only (keep the branch)
-3. Keep the worktree as-is
-
-Worktrees are created as siblings of the repo root: `~/src/myproject@fix-auth-bug`
-
-### VS Code worktree integration
-
-`omp-sbx-parallel` maintains a multi-root `.code-workspace` file at the repo root (`<repo-name>.code-workspace`) so VS Code can display all active worktrees as named roots in one window. The file is gitignored (`*.code-workspace`) — it's machine-local, never committed.
-
-**What happens automatically:**
-
-| Event | `.code-workspace` action |
-|---|---|
-| Worktree created/reused | Worktree added as a named root |
-| Cleanup: merge + remove | Root removed |
-| Cleanup: remove only | Root removed |
-| Cleanup: keep as-is | Root left in file |
-
-**Folder naming:** main checkout is `<repo-name>`; each worktree is `<repo-name> <branch>`. This lets VS Code tasks pin cwd via `${workspaceFolder:<name>}`:
-
-```json
-{
-  "label": "agent: feature-x",
-  "type": "shell",
-  "command": "omp-sbx-parallel --branch feature-x",
-  "options": { "cwd": "${workspaceFolder:myrepo feature-x}" }
-}
-```
-
-Requires `jq` on the host (silently skips if unavailable). For full agent instructions, see [`INSTRUCTIONS.md`](INSTRUCTIONS.md).
-
-**VS Code settings:** enable `git.detectWorktrees` to auto-list all worktrees in Source Control, even ones created outside VS Code.
-
 ## Scripted / CI use (experimental)
 
 `omp-sbxenv` is an alternative launcher built on Docker sbx's declarative
-`.sbxenv.yaml` + `sbx env` commands (sbx v0.39+; Docker marks `sbx env`
+`sbx-kit/.sbxenv.yaml` + `sbx env` commands (sbx v0.39+; Docker marks `sbx env`
 experimental and subject to change). It fits headless automation better than
 `omp-sbx`'s interactive create/pause/attach flow:
 

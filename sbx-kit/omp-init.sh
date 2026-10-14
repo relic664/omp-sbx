@@ -45,7 +45,7 @@ WORKSPACE_ENV="${WORKSPACE_DIR:-/home/agent/workspace}/.env"
 
 # ── MCP gateway (opt-in) ────────────────────────────────────────────────────
 # sbx serves the host's MCP registry to this sandbox over a gateway and injects
-# its URL. Register the servers on the host first, with omp-sbx-mcp-import.
+# its URL. Register the servers on the host first, with `sbx mcp add`.
 #
 # A project opts in with OMP_SBX_MCP_GATEWAY=1 in its .env. Off by default: a
 # gateway with nothing attached still hands omp the meta-tools that register
